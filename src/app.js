@@ -7,17 +7,20 @@
 // 1. Morgan (logging) - harus paling awal agar semua request ter-log
 // 2. CORS - sebelum route agar preflight request bisa dihandle
 // 3. Body parser - sebelum route agar req.body tersedia
-// 4. Routes - logika utama aplikasi
-// 5. Error handlers - PALING TERAKHIR
+// 4. Swagger UI - dokumentasi API interaktif
+// 5. Routes - logika utama aplikasi
+// 6. Error handlers - PALING TERAKHIR
 // ============================================
 
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const swaggerUi = require('swagger-ui-express');
 require('dotenv').config();
 
 const routes = require('./routes');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
+const swaggerSpec = require('./docs/swagger');
 
 const app = express();
 
@@ -56,7 +59,46 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // -----------------------------------------------
-// 4. ROUTES
+// 4. SWAGGER UI — Dokumentasi API Interaktif
+// Tersedia di: GET /api-docs
+// Hanya aktif di development (opsional, bisa dibuka di production juga)
+//
+// swaggerUi.serve  → menyajikan file statis Swagger UI (CSS, JS)
+// swaggerUi.setup  → mengkonfigurasi Swagger UI dengan spec kita
+// -----------------------------------------------
+const swaggerUiOptions = {
+  // Kustomisasi tampilan Swagger UI
+  customSiteTitle: 'Inventory API Docs',
+  customCss: `
+    .swagger-ui .topbar { background-color: #1a1a2e; }
+    .swagger-ui .topbar .download-url-wrapper { display: none; }
+    .swagger-ui .info .title { color: #1a1a2e; }
+  `,
+  swaggerOptions: {
+    // Collapse semua section secara default
+    docExpansion: 'none',
+    // Tampilkan tombol "Try it out" secara default
+    tryItOutEnabled: true,
+    // Urutkan endpoint berdasarkan method HTTP
+    operationsSorter: 'method',
+    // Tampilkan request duration
+    displayRequestDuration: true,
+    // Persist authorization (token tidak hilang saat refresh)
+    persistAuthorization: true,
+  },
+};
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
+
+// Endpoint untuk mengambil raw OpenAPI spec dalam format JSON
+// Berguna untuk tools lain (Postman import, code generator, dll)
+app.get('/api-docs.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerSpec);
+});
+
+// -----------------------------------------------
+// 5. ROUTES
 // Semua endpoint API dimulai dengan /api
 // -----------------------------------------------
 app.use('/api', routes);
@@ -66,12 +108,14 @@ app.get('/', (req, res) => {
   res.json({
     success: true,
     message: 'Inventory Management System API v2.0',
-    docs: '/api/health',
+    docs: '/api-docs',
+    spec: '/api-docs.json',
+    health: '/api/health',
   });
 });
 
 // -----------------------------------------------
-// 5. ERROR HANDLERS
+// 6. ERROR HANDLERS
 // Harus dipasang PALING TERAKHIR setelah semua route
 // -----------------------------------------------
 app.use(notFound);    // Tangani 404
