@@ -1,105 +1,123 @@
 // ============================================
 // app.js
 // Konfigurasi utama Express application.
-// File ini TIDAK menjalankan server (itu tugas server.js).
 //
-// URUTAN MIDDLEWARE SANGAT PENTING:
-// 1. Morgan (logging) - harus paling awal agar semua request ter-log
-// 2. CORS - sebelum route agar preflight request bisa dihandle
-// 3. Body parser - sebelum route agar req.body tersedia
-// 4. Swagger UI - dokumentasi API interaktif
-// 5. Routes - logika utama aplikasi
-// 6. Error handlers - PALING TERAKHIR
+// URUTAN MIDDLEWARE (PENTING!):
+// 1. Helmet       — security headers
+// 2. Morgan       — request logging
+// 3. CORS         — cross-origin
+// 4. Rate Limiter — global API limit
+// 5. Body Parser  — parse JSON body
+// 6. Static Files — serve uploaded images
+// 7. Swagger UI   — API documentation
+// 8. Routes       — logika aplikasi
+// 9. Error Handler — tangani semua error
 // ============================================
 
 const express = require('express');
 const cors = require('cors');
 const morgan = require('morgan');
+const helmet = require('helmet');
+const path = require('path');
 const swaggerUi = require('swagger-ui-express');
 require('dotenv').config();
 
 const routes = require('./routes');
 const { notFound, errorHandler } = require('./middleware/errorHandler');
+const { apiLimiter } = require('./middleware/rateLimiter');
 const swaggerSpec = require('./docs/swagger');
 
 const app = express();
 
 // -----------------------------------------------
-// 1. MORGAN - HTTP Request Logger
-// Mencatat setiap request: method, URL, status, response time
-//
-// Format 'dev': GET /api/products 200 15.234 ms
-// Format 'combined': Apache-style log (cocok untuk production)
+// 1. HELMET — Security Headers
+// Menambahkan berbagai HTTP header keamanan secara otomatis:
+// - X-Content-Type-Options: nosniff
+// - X-Frame-Options: DENY (mencegah clickjacking)
+// - X-XSS-Protection
+// - Strict-Transport-Security (HSTS)
+// - Content-Security-Policy
+// -----------------------------------------------
+app.use(
+  helmet({
+    // Nonaktifkan CSP untuk Swagger UI agar bisa load assets-nya
+    contentSecurityPolicy: false,
+    // Izinkan gambar dari domain yang sama
+    crossOriginResourcePolicy: { policy: 'cross-origin' },
+  })
+);
+
+// -----------------------------------------------
+// 2. MORGAN — HTTP Request Logger
 // -----------------------------------------------
 if (process.env.NODE_ENV === 'development') {
-  // Format 'dev' lebih mudah dibaca saat development
   app.use(morgan('dev'));
 } else {
-  // Format 'combined' lebih detail untuk production logging
   app.use(morgan('combined'));
 }
 
 // -----------------------------------------------
-// 2. CORS - Cross-Origin Resource Sharing
-// Mengizinkan request dari domain frontend yang berbeda.
-// Tanpa ini, browser akan memblokir request dari frontend.
+// 3. CORS — Cross-Origin Resource Sharing
 // -----------------------------------------------
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || '*',
-  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+app.use(
+  cors({
+    origin: process.env.CORS_ORIGIN || '*',
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+  })
+);
 
 // -----------------------------------------------
-// 3. BODY PARSER
-// Mengubah body request (JSON string) menjadi JavaScript object
-// sehingga bisa diakses via req.body
+// 4. RATE LIMITER — Global API Limit
+// Maks 100 request per menit per IP untuk semua /api
+// Endpoint login punya limiter sendiri yang lebih ketat
+// -----------------------------------------------
+app.use('/api', apiLimiter);
+
+// -----------------------------------------------
+// 5. BODY PARSER
 // -----------------------------------------------
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // -----------------------------------------------
-// 4. SWAGGER UI — Dokumentasi API Interaktif
-// Tersedia di: GET /api-docs
-// Hanya aktif di development (opsional, bisa dibuka di production juga)
+// 6. STATIC FILES — Serve uploaded images
+// Gambar yang diupload bisa diakses via:
+// GET http://localhost:3000/uploads/products/filename.jpg
 //
-// swaggerUi.serve  → menyajikan file statis Swagger UI (CSS, JS)
-// swaggerUi.setup  → mengkonfigurasi Swagger UI dengan spec kita
+// express.static memetakan URL /uploads ke folder public/uploads
+// -----------------------------------------------
+app.use('/uploads', express.static(path.join(process.cwd(), 'public/uploads')));
+
+// -----------------------------------------------
+// 7. SWAGGER UI — Dokumentasi API Interaktif
+// Tersedia di: GET /api-docs
 // -----------------------------------------------
 const swaggerUiOptions = {
-  // Kustomisasi tampilan Swagger UI
   customSiteTitle: 'Inventory API Docs',
   customCss: `
     .swagger-ui .topbar { background-color: #1a1a2e; }
     .swagger-ui .topbar .download-url-wrapper { display: none; }
-    .swagger-ui .info .title { color: #1a1a2e; }
   `,
   swaggerOptions: {
-    // Collapse semua section secara default
     docExpansion: 'none',
-    // Tampilkan tombol "Try it out" secara default
     tryItOutEnabled: true,
-    // Urutkan endpoint berdasarkan method HTTP
     operationsSorter: 'method',
-    // Tampilkan request duration
     displayRequestDuration: true,
-    // Persist authorization (token tidak hilang saat refresh)
     persistAuthorization: true,
   },
 };
 
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, swaggerUiOptions));
 
-// Endpoint untuk mengambil raw OpenAPI spec dalam format JSON
-// Berguna untuk tools lain (Postman import, code generator, dll)
+// Raw OpenAPI spec (untuk Postman import, dll)
 app.get('/api-docs.json', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.send(swaggerSpec);
 });
 
 // -----------------------------------------------
-// 5. ROUTES
-// Semua endpoint API dimulai dengan /api
+// 8. ROUTES
 // -----------------------------------------------
 app.use('/api', routes);
 
@@ -115,10 +133,9 @@ app.get('/', (req, res) => {
 });
 
 // -----------------------------------------------
-// 6. ERROR HANDLERS
-// Harus dipasang PALING TERAKHIR setelah semua route
+// 9. ERROR HANDLERS — PALING TERAKHIR
 // -----------------------------------------------
-app.use(notFound);    // Tangani 404
-app.use(errorHandler); // Tangani semua error lainnya
+app.use(notFound);
+app.use(errorHandler);
 
 module.exports = app;

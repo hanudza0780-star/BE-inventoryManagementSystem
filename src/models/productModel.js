@@ -8,12 +8,10 @@ const { pool } = require('../config/db');
 
 /**
  * Ambil semua produk dengan search, filter, dan pagination
- * @param {object} options
  */
 const findAll = async ({ search = '', page = 1, limit = 10, category = '' } = {}) => {
   const offset = (page - 1) * limit;
 
-  // Bangun WHERE clause secara dinamis
   let whereClause = `WHERE 1=1`;
   const params = [];
 
@@ -27,13 +25,13 @@ const findAll = async ({ search = '', page = 1, limit = 10, category = '' } = {}
     params.push(category);
   }
 
-  // Query data dengan JOIN ke categories
   const dataQuery = `
-    SELECT 
+    SELECT
       p.id, p.name, p.sku, p.category, p.category_id,
       c.name AS category_name,
-      p.description, p.price, p.stock, p.unit,
-      p.is_active, p.created_at, p.updated_at
+      p.description, p.price, p.stock, p.minimum_stock,
+      p.unit, p.image_url, p.is_active,
+      p.created_at, p.updated_at
     FROM products p
     LEFT JOIN categories c ON p.category_id = c.id
     ${whereClause}
@@ -41,8 +39,51 @@ const findAll = async ({ search = '', page = 1, limit = 10, category = '' } = {}
     LIMIT ? OFFSET ?
   `;
 
-  // Query hitung total (tanpa LIMIT/OFFSET)
-  const countQuery = `SELECT COUNT(*) as total FROM products p ${whereClause}`;
+  const countQuery = `SELECT COUNT(*) AS total FROM products p ${whereClause}`;
+
+  const [rows] = await pool.execute(dataQuery, [...params, Number(limit), Number(offset)]);
+  const [countResult] = await pool.execute(countQuery, params);
+
+  return {
+    data: rows,
+    total: countResult[0].total,
+    page: Number(page),
+    limit: Number(limit),
+    totalPages: Math.ceil(countResult[0].total / limit),
+  };
+};
+
+/**
+ * Ambil produk dengan stok rendah (stock <= minimum_stock)
+ */
+const findLowStock = async ({ search = '', category = '', page = 1, limit = 10 } = {}) => {
+  const offset = (page - 1) * limit;
+
+  let whereClause = `WHERE p.stock <= p.minimum_stock AND p.is_active = 1`;
+  const params = [];
+
+  if (search) {
+    whereClause += ` AND (p.name LIKE ? OR p.sku LIKE ?)`;
+    params.push(`%${search}%`, `%${search}%`);
+  }
+
+  if (category) {
+    whereClause += ` AND p.category = ?`;
+    params.push(category);
+  }
+
+  const dataQuery = `
+    SELECT
+      p.id, p.name, p.sku, p.category, p.stock,
+      p.minimum_stock, p.unit, p.image_url,
+      (p.minimum_stock - p.stock) AS shortage
+    FROM products p
+    ${whereClause}
+    ORDER BY p.stock ASC
+    LIMIT ? OFFSET ?
+  `;
+
+  const countQuery = `SELECT COUNT(*) AS total FROM products p ${whereClause}`;
 
   const [rows] = await pool.execute(dataQuery, [...params, Number(limit), Number(offset)]);
   const [countResult] = await pool.execute(countQuery, params);
@@ -84,11 +125,19 @@ const findBySku = async (sku) => {
 /**
  * Buat produk baru
  */
-const create = async ({ name, sku, category_id, category, description, price, stock, unit, is_active = 1 }) => {
+const create = async ({
+  name, sku, category_id, category, description,
+  price, stock, minimum_stock, unit, is_active = 1,
+}) => {
   const [result] = await pool.execute(
-    `INSERT INTO products (name, sku, category_id, category, description, price, stock, unit, is_active)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [name, sku, category_id || null, category, description || null, price, stock, unit || 'pcs', is_active]
+    `INSERT INTO products
+       (name, sku, category_id, category, description, price, stock, minimum_stock, unit, is_active)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      name, sku, category_id || null, category,
+      description || null, price, stock,
+      minimum_stock ?? 5, unit || 'pcs', is_active,
+    ]
   );
   return findById(result.insertId);
 };
@@ -96,14 +145,33 @@ const create = async ({ name, sku, category_id, category, description, price, st
 /**
  * Update produk berdasarkan ID
  */
-const update = async (id, { name, sku, category_id, category, description, price, stock, unit, is_active }) => {
+const update = async (id, {
+  name, sku, category_id, category, description,
+  price, stock, minimum_stock, unit, is_active,
+}) => {
   const [result] = await pool.execute(
-    `UPDATE products 
+    `UPDATE products
      SET name = ?, sku = ?, category_id = ?, category = ?, description = ?,
-         price = ?, stock = ?, unit = ?, is_active = ?,
+         price = ?, stock = ?, minimum_stock = ?, unit = ?, is_active = ?,
          updated_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
-    [name, sku, category_id || null, category, description || null, price, stock, unit || 'pcs', is_active, id]
+    [
+      name, sku, category_id || null, category,
+      description || null, price, stock,
+      minimum_stock ?? 5, unit || 'pcs', is_active, id,
+    ]
+  );
+  if (result.affectedRows === 0) return null;
+  return findById(id);
+};
+
+/**
+ * Update image_url produk
+ */
+const updateImage = async (id, imageUrl) => {
+  const [result] = await pool.execute(
+    `UPDATE products SET image_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+    [imageUrl, id]
   );
   if (result.affectedRows === 0) return null;
   return findById(id);
@@ -111,11 +179,10 @@ const update = async (id, { name, sku, category_id, category, description, price
 
 /**
  * Update stok produk (tambah atau kurangi)
- * Kondisi "stock + ? >= 0" mencegah stok minus
  */
 const updateStock = async (id, quantity) => {
   const [result] = await pool.execute(
-    `UPDATE products 
+    `UPDATE products
      SET stock = stock + ?, updated_at = CURRENT_TIMESTAMP
      WHERE id = ? AND stock + ? >= 0`,
     [quantity, id, quantity]
@@ -136,21 +203,23 @@ const remove = async (id) => {
 };
 
 /**
- * Ambil daftar kategori unik dari kolom category
+ * Ambil daftar kategori unik
  */
 const getCategories = async () => {
   const [rows] = await pool.execute(
     'SELECT DISTINCT category FROM products WHERE category IS NOT NULL ORDER BY category'
   );
-  return rows.map(row => row.category);
+  return rows.map((row) => row.category);
 };
 
 module.exports = {
   findAll,
+  findLowStock,
   findById,
   findBySku,
   create,
   update,
+  updateImage,
   updateStock,
   remove,
   getCategories,

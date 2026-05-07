@@ -82,7 +82,7 @@ Backend API untuk sistem manajemen inventaris yang dibangun dengan **Node.js**, 
     },
     {
       name: 'Products',
-      description: 'Manajemen produk inventaris — CRUD dan update stok',
+      description: 'Manajemen produk inventaris — CRUD, upload gambar, dan stok rendah',
     },
     {
       name: 'Categories',
@@ -91,6 +91,18 @@ Backend API untuk sistem manajemen inventaris yang dibangun dengan **Node.js**, 
     {
       name: 'Stocks',
       description: 'Manajemen pergerakan stok — masuk, keluar, dan riwayat',
+    },
+    {
+      name: 'Dashboard',
+      description: 'Statistik dan grafik dashboard (admin & manager)',
+    },
+    {
+      name: 'Logs',
+      description: 'Activity logs / audit trail (admin only)',
+    },
+    {
+      name: 'Health',
+      description: 'Health check server dan database',
     },
   ],
 
@@ -694,6 +706,7 @@ const options = {
     path.join(__dirname, './product.swagger.js'),
     path.join(__dirname, './category.swagger.js'),
     path.join(__dirname, './stock.swagger.js'),
+    path.join(__dirname, './dashboard.swagger.js'),
   ],
 };
 

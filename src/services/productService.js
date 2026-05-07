@@ -1,28 +1,33 @@
 // ============================================
 // services/productService.js
 // Logika bisnis untuk module products.
-// Semua validasi bisnis dan aturan ada di sini.
-// Controller hanya memanggil fungsi dari service ini.
 // ============================================
 
+const path = require('path');
 const productModel = require('../models/productModel');
 const AppError = require('../utils/AppError');
+const { getPagination, buildPaginationMeta } = require('../utils/pagination');
+const { deleteFile, extractFilePath } = require('../utils/fileHelper');
+const { MESSAGES } = require('../constants/messages');
 
 /**
  * Ambil semua produk dengan pagination, search, dan filter
  */
 const getAllProducts = async (queryParams) => {
-  const { search, page = 1, limit = 10, category } = queryParams;
+  const { search, category } = queryParams;
+  const { page, limit } = getPagination(queryParams);
 
-  const validPage = Math.max(1, parseInt(page) || 1);
-  const validLimit = Math.min(100, Math.max(1, parseInt(limit) || 10));
+  return productModel.findAll({ search, page, limit, category });
+};
 
-  return productModel.findAll({
-    search,
-    page: validPage,
-    limit: validLimit,
-    category,
-  });
+/**
+ * Ambil produk dengan stok rendah
+ */
+const getLowStockProducts = async (queryParams) => {
+  const { search, category } = queryParams;
+  const { page, limit } = getPagination(queryParams);
+
+  return productModel.findLowStock({ search, category, page, limit });
 };
 
 /**
@@ -30,9 +35,7 @@ const getAllProducts = async (queryParams) => {
  */
 const getProductById = async (id) => {
   const product = await productModel.findById(id);
-  if (!product) {
-    throw new AppError('Produk tidak ditemukan', 404);
-  }
+  if (!product) throw new AppError(MESSAGES.PRODUCT.NOT_FOUND, 404);
   return product;
 };
 
@@ -42,11 +45,8 @@ const getProductById = async (id) => {
 const createProduct = async (productData) => {
   const { sku } = productData;
 
-  // Cek SKU sudah dipakai
   const existingProduct = await productModel.findBySku(sku);
-  if (existingProduct) {
-    throw new AppError(`SKU '${sku}' sudah digunakan produk lain`, 409);
-  }
+  if (existingProduct) throw new AppError(MESSAGES.PRODUCT.SKU_TAKEN(sku), 409);
 
   return productModel.create(productData);
 };
@@ -57,58 +57,84 @@ const createProduct = async (productData) => {
 const updateProduct = async (id, productData) => {
   const { sku } = productData;
 
-  // Cek produk ada
   const existing = await productModel.findById(id);
-  if (!existing) {
-    throw new AppError('Produk tidak ditemukan', 404);
-  }
+  if (!existing) throw new AppError(MESSAGES.PRODUCT.NOT_FOUND, 404);
 
-  // Cek SKU duplikat (kecuali milik produk ini sendiri)
   const skuOwner = await productModel.findBySku(sku);
   if (skuOwner && skuOwner.id !== Number(id)) {
-    throw new AppError(`SKU '${sku}' sudah digunakan produk lain`, 409);
+    throw new AppError(MESSAGES.PRODUCT.SKU_TAKEN(sku), 409);
   }
 
   return productModel.update(id, productData);
 };
 
 /**
- * Hapus produk
+ * Upload / ganti gambar produk
+ *
+ * FLOW:
+ * 1. Cek produk ada
+ * 2. Jika produk sudah punya gambar → hapus file lama dari disk
+ * 3. Simpan path gambar baru ke database
+ * 4. Return data produk terbaru
+ *
+ * @param {number} id - ID produk
+ * @param {object} file - req.file dari Multer
+ * @param {string} baseUrl - Base URL server (untuk generate URL lengkap)
  */
-const deleteProduct = async (id) => {
+const uploadProductImage = async (id, file, baseUrl) => {
+  if (!file) throw new AppError('File gambar wajib diupload', 400);
+
   const existing = await productModel.findById(id);
-  if (!existing) {
-    throw new AppError('Produk tidak ditemukan', 404);
+  if (!existing) throw new AppError(MESSAGES.PRODUCT.NOT_FOUND, 404);
+
+  // Hapus gambar lama jika ada
+  if (existing.image_url) {
+    const oldFilePath = extractFilePath(existing.image_url);
+    deleteFile(oldFilePath);
   }
 
-  await productModel.remove(id);
-  return { message: `Produk '${existing.name}' berhasil dihapus` };
+  // Generate URL publik untuk gambar baru
+  // Contoh: http://localhost:3000/uploads/products/product-123.jpg
+  const imageUrl = `${baseUrl}/uploads/products/${file.filename}`;
+
+  return productModel.updateImage(id, imageUrl);
 };
 
 /**
- * Update stok produk langsung (tanpa mencatat riwayat)
- * Untuk pencatatan riwayat, gunakan stockService
+ * Hapus produk
+ * Juga hapus file gambar dari disk jika ada
+ */
+const deleteProduct = async (id) => {
+  const existing = await productModel.findById(id);
+  if (!existing) throw new AppError(MESSAGES.PRODUCT.NOT_FOUND, 404);
+
+  // Hapus file gambar dari disk
+  if (existing.image_url) {
+    const filePath = extractFilePath(existing.image_url);
+    deleteFile(filePath);
+  }
+
+  await productModel.remove(id);
+  return { message: MESSAGES.PRODUCT.DELETED(existing.name) };
+};
+
+/**
+ * Update stok produk langsung (tanpa riwayat)
  */
 const adjustStock = async (id, quantity) => {
   if (quantity === undefined || quantity === null) {
     throw new AppError('Field quantity wajib diisi', 400);
   }
-
   if (isNaN(quantity)) {
     throw new AppError('Jumlah stok harus berupa angka', 400);
   }
 
   const existing = await productModel.findById(id);
-  if (!existing) {
-    throw new AppError('Produk tidak ditemukan', 404);
-  }
+  if (!existing) throw new AppError(MESSAGES.PRODUCT.NOT_FOUND, 404);
 
   const updated = await productModel.updateStock(id, quantity);
   if (!updated) {
-    throw new AppError(
-      `Stok tidak mencukupi. Stok saat ini: ${existing.stock}`,
-      400
-    );
+    throw new AppError(MESSAGES.PRODUCT.STOCK_INSUFFICIENT(existing.stock), 400);
   }
 
   return updated;
@@ -116,9 +142,11 @@ const adjustStock = async (id, quantity) => {
 
 module.exports = {
   getAllProducts,
+  getLowStockProducts,
   getProductById,
   createProduct,
   updateProduct,
+  uploadProductImage,
   deleteProduct,
   adjustStock,
 };

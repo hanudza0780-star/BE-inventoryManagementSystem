@@ -1,74 +1,62 @@
 // ============================================
 // services/authService.js
 // Logika bisnis untuk autentikasi.
-// Bcrypt untuk hash password, JWT untuk token.
+// Mencatat activity log saat login berhasil.
 // ============================================
 
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const userModel = require('../models/userModel');
 const AppError = require('../utils/AppError');
+const { createLog } = require('../middleware/activityLogger');
+const { MESSAGES } = require('../constants/messages');
 
 /**
  * Register user baru
- * Password di-hash dengan bcrypt sebelum disimpan ke database.
- * JANGAN PERNAH simpan password plain text!
  */
 const register = async ({ name, email, password, role }) => {
-  // Cek email sudah terdaftar
   const existing = await userModel.findByEmail(email);
-  if (existing) {
-    throw new AppError('Email sudah terdaftar', 409);
-  }
+  if (existing) throw new AppError(MESSAGES.AUTH.EMAIL_TAKEN, 409);
 
-  // Hash password dengan bcrypt
-  // saltRounds = 10 adalah standar yang aman (lebih tinggi = lebih lambat tapi lebih aman)
-  const saltRounds = 10;
-  const hashedPassword = await bcrypt.hash(password, saltRounds);
+  const hashedPassword = await bcrypt.hash(password, 10);
 
-  const user = await userModel.create({
+  return userModel.create({
     name,
     email,
     password: hashedPassword,
     role: role || 'staff',
   });
-
-  return user;
 };
 
 /**
  * Login dan generate JWT token
+ * Mencatat activity log saat login berhasil
  */
-const login = async ({ email, password }) => {
-  // Cari user berdasarkan email
+const login = async ({ email, password }, ipAddress = null) => {
   const user = await userModel.findByEmail(email);
 
-  // Gunakan pesan yang sama untuk email/password salah
-  // (mencegah user mengetahui email mana yang terdaftar)
-  if (!user) {
-    throw new AppError('Email atau password salah', 401);
-  }
+  // Pesan sama untuk email/password salah (mencegah user enumeration)
+  if (!user) throw new AppError(MESSAGES.AUTH.INVALID_CREDENTIALS, 401);
 
-  // Bandingkan password dengan hash di database menggunakan bcrypt
   const isPasswordValid = await bcrypt.compare(password, user.password);
-  if (!isPasswordValid) {
-    throw new AppError('Email atau password salah', 401);
-  }
+  if (!isPasswordValid) throw new AppError(MESSAGES.AUTH.INVALID_CREDENTIALS, 401);
 
-  // Generate JWT access token
-  // Payload berisi data yang akan tersedia di req.user setelah verifikasi
+  // Generate JWT token
   const token = jwt.sign(
-    {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      name: user.name,
-    },
+    { id: user.id, email: user.email, role: user.role, name: user.name },
     process.env.JWT_SECRET,
     { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
   );
 
-  // Kembalikan token dan info user (TANPA password)
+  // Catat activity log login berhasil (fire and forget)
+  createLog({
+    user_id: user.id,
+    action: 'LOGIN',
+    module: 'auth',
+    description: `${user.name} (${user.role}) berhasil login`,
+    ip_address: ipAddress,
+  });
+
   return {
     token,
     token_type: 'Bearer',
